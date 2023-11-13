@@ -1,0 +1,258 @@
+name: fridgeware
+summary: Firmware snap for the Maybell Fridge
+description: |
+  The firmware to be booted onto a Maybell Fridge system.
+  For use by Maybell personel.
+version: 0.1.0
+grade: 'devel'
+
+base: core22
+
+confinement: devmode
+
+parts:
+  hmi:
+    plugin: nil
+    source: .
+    source-subdir: build
+    build-environment:
+      - PATH: "$PATH:$CRAFT_PART_SRC_WORK/node_modules/.bin"
+    override-build: |
+      cd $CRAFT_PART_SRC_WORK
+      set +u # core20 base does not allow unbound variables !
+      # workaround for build.snapcraft.io builds
+      # https://bugs.launchpad.net/bugs/1886861
+      if [ -n "$http_proxy" ]; then
+        export ELECTRON_GET_USE_PROXY=1
+        export GLOBAL_AGENT_HTTP_PROXY="${http_proxy}"
+        export GLOBAL_AGENT_HTTPS_PROXY="${http_proxy}"
+      fi
+
+      # Replace the default app with the Mir website
+      # sed --in-place "s!loadFile('index.html')!loadURL('https://mir-server.io')!" main.js
+
+      npm install --omit=dev
+      npm install --unsafe-perm true electron-packager
+      electron-packager . --overwrite --platform=linux \
+          --output=release-build --prune=true
+      cp -a ./hmi-linux-* $SNAPCRAFT_PART_INSTALL/hmi
+      chmod a+rx $SNAPCRAFT_PART_INSTALL/hmi
+    stage-packages:
+      - libnspr4
+      - libnss3
+      - libatk-bridge2.0-0
+      - libcups2
+      - libgtk-3-0
+      - libasound2
+    build-snaps:
+      - node/16/stable
+
+  wrapper:
+    plugin: dump
+    source: wrapper
+    organize:
+      wrapper.sh: usr/bin/wrapper
+
+  gsettings+pixbuf+immodules:
+    plugin: nil
+    build-packages:
+      - libgdk-pixbuf2.0-0
+      - librsvg2-common
+      - shared-mime-info
+      - libgtk-3-0
+    override-build: |
+      craftctl default
+      # Update mime database
+      update-mime-database ${CRAFT_PART_INSTALL}/usr/share/mime
+      # build immodules cache
+      mkdir -p ${CRAFT_PART_INSTALL}/usr/lib/${CRAFT_ARCH_TRIPLET}/gtk-3.0/3.0.0/
+      /usr/lib/${CRAFT_ARCH_TRIPLET}/libgtk-3-0/gtk-query-immodules-3.0 > ${CRAFT_PART_INSTALL}/usr/lib/${CRAFT_ARCH_TRIPLET}/gtk-3.0/3.0.0/immodules.cache
+    stage-packages:
+      - librsvg2-common
+      - gsettings-desktop-schemas
+      - libglib2.0-bin
+    override-prime: |
+      craftctl default
+      # Compile the gsettings schemas
+      /usr/lib/${CRAFT_ARCH_TRIPLET}/glib-2.0/glib-compile-schemas "$CRAFT_PRIME/usr/share/glib-2.0/schemas"
+      # Index the pixbuf loaders
+      LOADERS_PATH=$(echo ${CRAFT_PRIME}/usr/lib/${CRAFT_ARCH_TRIPLET}/gdk-pixbuf-2.0/*/loaders)
+      QUERY_LOADERS=/usr/lib/${CRAFT_ARCH_TRIPLET}/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders
+      GDK_PIXBUF_MODULEDIR=${LOADERS_PATH} ${QUERY_LOADERS} > ${LOADERS_PATH}/../loaders.cache
+      sed s!$CRAFT_PRIME!!g --in-place ${LOADERS_PATH}/../loaders.cache
+
+  dbus:
+    plugin: dump
+    source: dbus
+    override-prime: |
+      craftctl default
+      # replace the SNAP_NAME placeholder with our actual project name
+      sed -i "s/SNAP_NAME/$SNAPCRAFT_PROJECT_NAME/" $SNAPCRAFT_PRIME/etc/dbus-1/session.conf
+
+  setup:
+    plugin: dump
+    source: wayland-launch
+    override-build: |
+      # The plugs needed to run Wayland. (wayland-launch checks them, setup.sh connects them)
+      # You may add further plugs here if you want these options
+      PLUGS="opengl wayland graphics-core22 browser-support network network-bind"
+      sed --in-place "s/%PLUGS%/$PLUGS/g" $CRAFT_PART_BUILD/bin/wayland-launch
+      sed --in-place "s/%PLUGS%/$PLUGS/g" $CRAFT_PART_BUILD/bin/setup.sh
+      craftctl default
+    stage-packages:
+      - inotify-tools
+
+  graphics-core22:
+    after:
+      - hmi
+      - wrapper
+      - dbus
+      - gsettings+pixbuf+immodules
+      - setup
+    source: https://github.com/MirServer/graphics-core22.git
+    plugin: dump
+    override-prime: |
+      craftctl default
+      ${CRAFT_PART_SRC}/bin/graphics-core22-cleanup mesa-core22 nvidia-core22
+      cd "$CRAFT_PRIME/usr/share/"
+      rm -rf bug drirc.d glvnd libdrm lintian man
+      rm -rf applications apport bash-completion dbus-1 doc-base doc gtk-doc\
+             help pkgconfig libthai metainfo themes thumbnailers xml
+    prime:
+      - bin/graphics-core22-wrapper
+
+  python:
+    plugin: autotools
+    source: https://www.python.org/ftp/python/3.11.0/Python-3.11.0.tgz
+    autotools-configure-parameters:
+      - --enable-optimizations
+      - --prefix=/usr
+    build-packages:
+      - build-essential
+      - gdb
+      - lcov
+      - pkg-config
+      - libbz2-dev
+      - libffi-dev
+      - libgdbm-dev
+      - libgdbm-compat-dev
+      - liblzma-dev
+      - libncurses5-dev
+      - libreadline6-dev
+      - libsqlite3-dev
+      - libssl-dev
+      - lzma
+      - lzma-dev
+      - tk-dev
+      - uuid-dev
+      - zlib1g-dev
+    stage-packages:
+      - libfontconfig1
+      - libfreetype6
+      - libgdbm-compat4
+      - libgdbm6
+      - libpng16-16
+      - libtcl8.6
+      - libtk8.6
+      - libx11-6
+      - libxau6
+      - libxcb1
+      - libxdmcp6
+      - libxext6
+      - libxft2
+      - libxrender1
+      - libxss1
+    prime:
+      - -etc
+      - -lib/systemd
+      - -usr/bin/2to3
+      - -usr/bin/2to3-3.11
+      - -usr/bin/deb-systemd-helper
+      - -usr/bin/deb-systemd-invoke
+      - -usr/bin/easy_install-3.11
+      - -usr/bin/idle3
+      - -usr/bin/idle3.11
+      - -usr/bin/pydoc3
+      - -usr/bin/pydoc3.11
+      - -usr/bin/python3.11-config
+      - -usr/bin/python3-config
+      - -usr/bin/uuidgen
+      - -usr/include
+      - -usr/lib/*.a
+      - -usr/lib/pkgconfig
+      - -usr/lib/python3.11/test
+      - -usr/sbin
+      - -usr/share
+      - -var
+
+
+apps:
+
+  fridgeware:
+    command-chain: &_command-chain
+      - bin/graphics-core22-wrapper
+      - bin/wayland-launch
+      - bin/dbus-launch
+    command: &_command usr/bin/wrapper
+    plugs: &_plugs
+      - opengl
+      - wayland
+      - browser-support
+      - network
+      - network-bind
+    environment: &_environment
+      XDG_DATA_HOME: $SNAP_USER_DATA
+      XDG_DATA_DIRS: $SNAP/usr/share
+      GTK_USE_PORTAL: 0
+      GDK_GL: gles
+
+
+layout:
+  /usr/local/advtty:
+    bind: $SNAP/bin
+  /usr/share/libdrm:
+    bind: $SNAP/graphics/libdrm
+  /usr/share/drirc.d:
+    symlink: $SNAP/graphics/drirc.d
+  # Other, generally useful paths
+  /usr/share/fonts:
+    bind: $SNAP/usr/share/fonts
+  /usr/share/icons:
+    bind: $SNAP/usr/share/icons
+  /usr/share/sounds:
+    bind: $SNAP/usr/share/sounds
+  /etc/fonts:
+    bind: $SNAP/etc/fonts
+  # GTK
+  /usr/lib/$CRAFT_ARCH_TRIPLET/gdk-pixbuf-2.0:
+    bind: $SNAP/usr/lib/$CRAFT_ARCH_TRIPLET/gdk-pixbuf-2.0
+  /usr/lib/${CRAFT_ARCH_TRIPLET}/gtk-3.0:
+    bind: $SNAP/usr/lib/${CRAFT_ARCH_TRIPLET}/gtk-3.0
+  /usr/share/mime:
+    bind: $SNAP/usr/share/mime
+  /etc/gtk-3.0:
+    bind: $SNAP/etc/gtk-3.0
+
+hooks:
+  remove:
+    plugs:
+      - account-control
+
+architectures:
+  - build-on: amd64
+
+plugs:
+  graphics-core22:
+    interface: content
+    target: $SNAP/graphics
+    default-provider: mesa-core22
+
+environment:
+  # Other, generally useful environment settings...
+  # XDG config
+  XDG_CACHE_HOME:  $SNAP_USER_COMMON/.cache
+  XDG_CONFIG_HOME: $SNAP_USER_DATA/.config
+  XDG_CONFIG_DIRS: $SNAP/etc/xdg
+  XDG_DATA_DIRS:   $SNAP/usr/local/share:$SNAP/usr/share
+  # XKB config
+  XKB_CONFIG_ROOT: $SNAP/usr/share/X11/xkb
